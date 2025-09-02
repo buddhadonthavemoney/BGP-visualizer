@@ -90,13 +90,47 @@
             border-radius: 50%;
             border: 1px solid #ddd;
         }
+        .explanation-box {
+            text-align: left;
+            max-width: 450px;
+            margin: 1.5rem auto 0;
+            background-color: #fafafa;
+            padding: 1rem 1.5rem;
+            border-radius: 8px;
+            border: 1px solid #e2e8f0;
+        }
+        .explanation-box h3 {
+            margin-top: 0;
+            text-align: center;
+            font-weight: 600;
+        }
+        .explanation-box ul {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        .explanation-box li {
+            margin-bottom: 0.5rem;
+        }
     </style>
 </head>
 <body>
 
     <main>
         <h1>BGP Protocol Visualization</h1>
-        <p>This animation demonstrates how routing information propagates through a network of Autonomous Systems (AS). When an AS advertises a network prefix, it creates a route and attaches its own number to an attribute called the AS_PATH. As this advertisement is passed to the next AS, that AS prepends its own number to the list. This creates an ordered sequence of AS numbers, the "AS Path," which functions as a distance vector, showing the exact path the advertisement has traveled.<br><br>When an AS receives multiple advertisements for the same prefix, it compares the AS_PATH lists. The path with the fewest AS numbers in its list is considered the shortest and is selected as the best route to the destination.</p>
+        <p>
+            This animation demonstrates how routing information propagates through a network of Autonomous Systems (AS). When an AS advertises a network prefix, it attaches its own number to an attribute called the AS_PATH. As this advertisement is passed to the next AS, that AS prepends its own number to the list. This creates an ordered sequence of AS numbers—the "AS Path"—which functions as a distance vector, showing the exact path the advertisement has traveled.
+        </p>
+        
+        <div class="explanation-box">
+            <h3>How to Read the Animation</h3>
+            <ul>
+                <li><strong>Routing Information Base (RIB):</strong> The list of network prefixes and their paths shown below each AS. This is the router's table of all learned routes.</li>
+                <li><strong style="color: #006400;">Best Path (Bold Green):</strong> The active, shortest AS_PATH selected by the router to reach a destination.</li>
+                <li><strong style="color: #808080;">Other Paths (Grey):</strong> Alternative, longer paths that the router has learned but is not currently using.</li>
+            </ul>
+        </div>
+
         <div id="canvas-container"></div>
         <button id="reset-button">Reset Simulation</button>
         <div class="legend">
@@ -246,6 +280,7 @@
 
                     const MAX_PATHS_TO_SHOW = 3;
                     let pathsShown = 0;
+                    // First loop to display the best path
                     for (const p of sortedPaths) {
                         if (pathsShown >= MAX_PATHS_TO_SHOW) break;
                         const isBest = JSON.stringify(p.path) === JSON.stringify(ribEntry.bestPath);
@@ -258,6 +293,7 @@
                             pathsShown++;
                         }
                     }
+                    // Second loop to display other paths
                     for (const p of sortedPaths) {
                         if (pathsShown >= MAX_PATHS_TO_SHOW) break;
                          const isBest = JSON.stringify(p.path) === JSON.stringify(ribEntry.bestPath);
