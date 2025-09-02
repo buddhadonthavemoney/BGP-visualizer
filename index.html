@@ -593,11 +593,14 @@
             systems = []; // Clear any existing systems
 
             // Create Autonomous Systems, positions are relative to canvas size
-            const as1 = new AutonomousSystem(100, width * 0.2, height * 0.25);
+            const as1 = new AutonomousSystem(100, width * 0.3, height * 0.25);
             const as2 = new AutonomousSystem(200, width * 0.5, height * 0.15);
-            const as3 = new AutonomousSystem(300, width * 0.8, height * 0.25);
+            const as3 = new AutonomousSystem(300, width * 0.7, height * 0.25);
             const as4 = new AutonomousSystem(400, width * 0.35, height * 0.75);
             const as5 = new AutonomousSystem(500, width * 0.65, height * 0.75);
+            const as6 = new AutonomousSystem(600, width * 0.1, height * 0.5);
+            const as7 = new AutonomousSystem(700, width * 0.9, height * 0.5);
+
 
             // Establish peering (connections)
             as1.addNeighbor(as2);
@@ -618,7 +621,14 @@
             as2.addNeighbor(as5);
             as5.addNeighbor(as2);
 
-            systems.push(as1, as2, as3, as4, as5);
+            // Add new connections
+            as6.addNeighbor(as1);
+            as1.addNeighbor(as6);
+
+            as7.addNeighbor(as3);
+            as3.addNeighbor(as7);
+
+            systems.push(as1, as2, as3, as4, as5, as6, as7);
         }
     </script>
 </body>
