@@ -132,211 +132,418 @@
                 this.neighbors = [];
                 // Routing Information Base (RIB)
                 // { prefix: { allPaths: [{path, fromNeighbor}], bestPath: path } }
-                this.rib = {}; 
+                this.rib = {};
                 this.color = color(226, 232, 240); // neutral color
                 this.targetColor = this.color;
+                this.hoverTargets = []; // For tooltips
             }
 
             addNeighbor(neighbor) {
                 this.neighbors.push(neighbor);
             }
-            
-            // Originate a new route advertisement
-            advertisePrefix() {
+
+            // Originate a new prefix
+            advertise() {
                 const prefix = `10.0.${nextPrefix}.0/24`;
                 nextPrefix++;
-                
-                const initialPath = [this.asn];
-
-                // Add to own RIB
-                this.rib[prefix] = {
-                    allPaths: [{ path: initialPath, fromNeighbor: null }], // null indicates self-originated
-                    bestPath: initialPath
-                };
+                const newPath = [this.asn];
+                this.receiveAdvertisement({ prefix, path: newPath }, null); // Receive its own ad
                 this.targetColor = color(99, 179, 237); // advertising color
-
-                // Create new advertisements for neighbors
-                for (let neighbor of this.neighbors) {
-                    advertisements.push(new Advertisement(prefix, initialPath, this, neighbor));
-                }
             }
 
             // Receive an advertisement from a neighbor
-            receiveAdvertisement(ad) {
-                // BGP Loop Prevention: if my ASN is already in the path, ignore it.
-                if (ad.path.includes(this.asn)) {
+            receiveAdvertisement(ad, fromNeighbor) {
+                const { prefix, path } = ad;
+
+                // BGP loop prevention: Only check if the ad is from a neighbor
+                if (fromNeighbor && path.includes(this.asn)) {
                     return;
                 }
 
-                const prefix = ad.prefix;
-                const newPath = [this.asn, ...ad.path];
-                const fromNeighborAsn = ad.from.asn;
-
+                // Initialize RIB entry if it doesn't exist
                 if (!this.rib[prefix]) {
-                    this.rib[prefix] = { allPaths: [], bestPath: null };
+                    this.rib[prefix] = {
+                        allPaths: [],
+                        bestPath: null
+                    };
                 }
+
                 const ribEntry = this.rib[prefix];
-                const oldBestPath = ribEntry.bestPath ? [...ribEntry.bestPath] : null;
 
-                // Add or update the path learned from this neighbor
-                let pathFromNeighborFound = false;
-                for (let p of ribEntry.allPaths) {
-                    if (p.fromNeighbor === fromNeighborAsn) {
-                        p.path = newPath;
-                        pathFromNeighborFound = true;
-                        break;
-                    }
-                }
-                if (!pathFromNeighborFound) {
-                    ribEntry.allPaths.push({ path: newPath, fromNeighbor: fromNeighborAsn });
+                // Add the new path to the list of all paths
+                ribEntry.allPaths.push({ path: path, fromNeighbor: fromNeighbor });
+
+                // Determine the new best path
+                let currentBest = ribEntry.bestPath;
+                let newBest = currentBest;
+
+                if (!currentBest || path.length < currentBest.length) {
+                    newBest = path;
                 }
 
-                // Recalculate best path from all available paths (shortest wins)
-                let bestPathSoFar = null;
-                 // Give preference to locally originated route if it exists
-                const selfOriginated = ribEntry.allPaths.find(p => p.fromNeighbor === null);
-                if (selfOriginated) {
-                    bestPathSoFar = selfOriginated.path;
-                }
-                for (const p of ribEntry.allPaths) {
-                    if (!bestPathSoFar || p.path.length < bestPathSoFar.length) {
-                        bestPathSoFar = p.path;
-                    }
-                }
-                ribEntry.bestPath = bestPathSoFar;
-                
-                const bestPathChanged = JSON.stringify(oldBestPath) !== JSON.stringify(ribEntry.bestPath);
-
-                // If the best path has changed, update color and propagate the new best path
-                if (bestPathChanged) {
-                    if (this.targetColor.toString() !== color(99, 179, 237).toString()) {
-                       this.targetColor = color(198, 246, 213); // has path color
-                    }
-
+                // If the best path changed, update and propagate
+                if (JSON.stringify(newBest) !== JSON.stringify(currentBest)) {
+                    ribEntry.bestPath = newBest;
                     // Propagate the new best path to neighbors
-                    for (let neighbor of this.neighbors) {
-                        // Split Horizon: Don't send route back to the AS that gave it to you.
-                        if (neighbor.asn !== ribEntry.bestPath[1]) {
-                            advertisements.push(new Advertisement(prefix, ribEntry.bestPath, this, neighbor));
-                        }
-                    }
+                    this.propagate(prefix, newBest);
+                }
+                
+                if (Object.keys(this.rib).length > 0 && this.targetColor.toString() !== color(99, 179, 237).toString()) {
+                    this.targetColor = color(198, 246, 213); // Has path color
+                }
+            }
+
+            // Propagate a route to all neighbors
+            propagate(prefix, path) {
+                for (let neighbor of this.neighbors) {
+                    const newPath = [this.asn, ...path];
+                    const newAd = new Advertisement(
+                        this.pos.copy(),
+                        neighbor.pos.copy(),
+                        { prefix: prefix, path: newPath },
+                        neighbor
+                    );
+                    advertisements.push(newAd);
                 }
             }
 
             display() {
                 // Smooth color transition
                 this.color = lerpColor(this.color, this.targetColor, 0.1);
+                this.hoverTargets = []; // Reset hover targets each frame
 
                 stroke(50);
                 strokeWeight(2);
                 fill(this.color);
                 ellipse(this.pos.x, this.pos.y, this.size, this.size);
 
+                // Display ASN
                 noStroke();
                 fill(0);
                 textAlign(CENTER, CENTER);
                 textSize(14);
+                textStyle(BOLD);
                 text(`AS ${this.asn}`, this.pos.x, this.pos.y);
 
-                // Display RIB details
-                let yOffset = this.pos.y + this.size / 2 + 15;
+                // Display RIB
                 textSize(10);
                 textAlign(CENTER, TOP);
+                let yOffset = this.pos.y + this.size / 2 + 10;
+                
+                const MAX_PREFIXES_TO_SHOW = 2;
+                const prefixes = Object.keys(this.rib);
 
-                for (const prefix in this.rib) {
+                for (let i = 0; i < Math.min(prefixes.length, MAX_PREFIXES_TO_SHOW); i++) {
+                    const prefix = prefixes[i];
                     const ribEntry = this.rib[prefix];
-                    if (!ribEntry.bestPath) continue;
-
-                    // Prefix title
                     fill(0);
                     textStyle(BOLD);
                     text(prefix, this.pos.x, yOffset);
                     yOffset += 12;
                     textStyle(NORMAL);
 
-                    // Sort paths to show best one first, then others by length
-                    const sortedPaths = [...ribEntry.allPaths].sort((a, b) => {
-                        const isABest = JSON.stringify(a.path) === JSON.stringify(ribEntry.bestPath);
-                        const isBBest = JSON.stringify(b.path) === JSON.stringify(ribEntry.bestPath);
-                        if (isABest) return -1;
-                        if (isBBest) return 1;
-                        return a.path.length - b.path.length;
-                    });
+                    const sortedPaths = [...ribEntry.allPaths].sort((a, b) => a.path.length - b.path.length);
 
                     const MAX_PATHS_TO_SHOW = 3;
-                    for (let i = 0; i < Math.min(sortedPaths.length, MAX_PATHS_TO_SHOW); i++) {
-                        const p = sortedPaths[i];
+                    let pathsShown = 0;
+                    for (const p of sortedPaths) {
+                        if (pathsShown >= MAX_PATHS_TO_SHOW) break;
                         const isBest = JSON.stringify(p.path) === JSON.stringify(ribEntry.bestPath);
                         if (isBest) {
                             fill(0, 100, 0); // Dark Green
                             textStyle(BOLD);
                             text(`> ${p.path.join(' → ')}`, this.pos.x, yOffset);
                             textStyle(NORMAL);
-                        } else if (p.fromNeighbor) { // Don't show self-originated if not best
-                            fill(120); // Grey
-                            text(`  ${p.path.join(' → ')}`, this.pos.x, yOffset);
+                            yOffset += 12;
+                            pathsShown++;
                         }
-                        yOffset += 12;
+                    }
+                    for (const p of sortedPaths) {
+                        if (pathsShown >= MAX_PATHS_TO_SHOW) break;
+                         const isBest = JSON.stringify(p.path) === JSON.stringify(ribEntry.bestPath);
+                         if(!isBest) {
+                             fill(120); // Grey
+                             text(`  ${p.path.join(' → ')}`, this.pos.x, yOffset);
+                             yOffset += 12;
+                             pathsShown++;
+                         }
                     }
 
                     if (sortedPaths.length > MAX_PATHS_TO_SHOW) {
                         fill(150);
-                        text(`  (...)`, this.pos.x, yOffset);
+                        const indicatorText = '  (...)';
+                        text(indicatorText, this.pos.x, yOffset);
+                        
+                        const indicatorWidth = textWidth(indicatorText);
+                        const indicatorHeight = 12;
+                        this.hoverTargets.push({
+                            type: 'paths',
+                            prefix: prefix,
+                            x: this.pos.x - indicatorWidth / 2,
+                            y: yOffset - indicatorHeight/2,
+                            w: indicatorWidth,
+                            h: indicatorHeight,
+                        });
                         yOffset += 12;
                     }
 
                     yOffset += 5; // Spacer between prefixes
                 }
+
+                if (prefixes.length > MAX_PREFIXES_TO_SHOW) {
+                     fill(150);
+                     const indicatorText = '(...)';
+                     text(indicatorText, this.pos.x, yOffset);
+                     const indicatorWidth = textWidth(indicatorText);
+                     const indicatorHeight = 12;
+                     this.hoverTargets.push({
+                         type: 'rib',
+                         x: this.pos.x - indicatorWidth / 2,
+                         y: yOffset - indicatorHeight / 2,
+                         w: indicatorWidth,
+                         h: indicatorHeight
+                     });
+                }
             }
         }
 
-        // --- Advertisement Class ---
+        // --- Advertisement Packet Class ---
         class Advertisement {
-            constructor(prefix, path, from, to) {
-                this.prefix = prefix;
-                this.path = path;
-                this.from = from;
-                this.to = to;
-                this.pos = from.pos.copy();
-                this.speed = 2;
+            constructor(start, end, data, target) {
+                this.start = start;
+                this.end = end;
+                this.data = data;
+                this.target = target;
                 this.progress = 0;
             }
 
             update() {
-                let direction = p5.Vector.sub(this.to.pos, this.from.pos);
-                let totalDist = direction.mag();
-                direction.normalize();
-                this.pos.add(direction.mult(this.speed));
-                this.progress = p5.Vector.dist(this.from.pos, this.pos) / totalDist;
-                
-                // Check if arrived
-                if (this.progress >= 1.0) {
-                    this.to.receiveAdvertisement(this);
+                this.progress += 0.02;
+                if (this.progress >= 1) {
+                    this.target.receiveAdvertisement(this.data, this.start);
                     return true; // Mark for removal
                 }
                 return false;
             }
 
             display() {
-                fill(255, 165, 0); // Orange for packet
+                const currentPos = p5.Vector.lerp(this.start, this.end, this.progress);
+                fill(255, 165, 0, 200); // Orange
                 noStroke();
-                rectMode(CENTER);
-                let angle = atan2(this.to.pos.y - this.from.pos.y, this.to.pos.x - this.from.pos.x);
-                push();
-                translate(this.pos.x, this.pos.y);
-                rotate(angle);
-                rect(0, 0, 12, 8);
-                pop();
+                ellipse(currentPos.x, currentPos.y, 15, 15);
                 
-                // Display prefix and path on packet
-                fill(0);
-                textSize(9);
-                textAlign(CENTER, BOTTOM);
-                text(this.prefix, this.pos.x, this.pos.y - 15);
-                textSize(8);
-                fill(80);
-                text(`[${this.path.join(',')}]`, this.pos.x, this.pos.y - 5);
+                // Display info on hover
+                if (dist(mouseX, mouseY, currentPos.x, currentPos.y) < 15) {
+                     push();
+                     fill(255, 255, 240, 240);
+                     stroke(100);
+                     rectMode(CORNER);
+                     let pathStr = `${this.data.prefix}: ${this.data.path.join('→')}`;
+                     let boxWidth = textWidth(pathStr) + 10;
+                     rect(currentPos.x + 10, currentPos.y - 10, boxWidth, 20, 3);
+                     fill(0);
+                     noStroke();
+                     textAlign(LEFT, CENTER);
+                     text(pathStr, currentPos.x + 15, currentPos.y);
+                     pop();
+                }
             }
+        }
+
+        // --- P5.js Setup ---
+        function setup() {
+            let container = document.getElementById('canvas-container');
+            let w = container.offsetWidth;
+            let h = w * 0.6; // Maintain aspect ratio
+            canvas = createCanvas(w, h);
+            canvas.parent('canvas-container');
+
+            document.getElementById('reset-button').addEventListener('click', resetSimulation);
+            
+            resetSimulation();
+        }
+        
+        // --- P5.js Draw Loop ---
+        function draw() {
+            background(255);
+
+            // Draw connections between systems
+            stroke(180);
+            strokeWeight(3);
+            for (let as1 of systems) {
+                for (let as2 of as1.neighbors) {
+                    // To avoid drawing lines twice, only draw if as1's number is smaller
+                    if (as1.asn < as2.asn) {
+                        line(as1.pos.x, as1.pos.y, as2.pos.x, as2.pos.y);
+                    }
+                }
+            }
+
+            // Update and display advertisements
+            for (let i = advertisements.length - 1; i >= 0; i--) {
+                advertisements[i].display();
+                if (advertisements[i].update()) {
+                    advertisements.splice(i, 1);
+                }
+            }
+
+            // Display systems
+            for (let as of systems) {
+                as.display();
+            }
+
+            // --- Tooltip Logic ---
+            let activeTooltip = null;
+            for (const as of systems) {
+                for (const target of as.hoverTargets) {
+                    if (mouseX > target.x && mouseX < target.x + target.w && mouseY > target.y && mouseY < target.y + target.h) {
+                        activeTooltip = { as, target };
+                        break;
+                    }
+                }
+                if (activeTooltip) break;
+            }
+
+            if (activeTooltip) {
+                drawTooltip(activeTooltip.as, activeTooltip.target);
+            }
+        }
+        
+        // --- Interactivity ---
+        function mousePressed() {
+            if (mouseX < 0 || mouseX > width || mouseY < 0 || mouseY > height) return;
+            for (let as of systems) {
+                if (dist(mouseX, mouseY, as.pos.x, as.pos.y) < as.size / 2) {
+                    as.advertise();
+                }
+            }
+        }
+        
+        // --- Tooltip Drawing Function ---
+        function drawTooltip(as, target) {
+            push(); // Isolate tooltip styles
+            if (target.type === 'paths') {
+                const prefix = target.prefix;
+                const ribEntry = as.rib[prefix];
+                if (!ribEntry) return;
+
+                const allPaths = [...ribEntry.allPaths].sort((a, b) => a.path.length - b.path.length);
+                const bestPath = ribEntry.bestPath;
+
+                const padding = 8;
+                const lineHeight = 12;
+                const titleHeight = 15;
+                let maxWidth = textWidth(`All Paths for ${prefix}`) + 2 * padding;
+
+                for (const p of allPaths) {
+                    const pathText = `> ${p.path.join(' → ')}`;
+                    maxWidth = max(maxWidth, textWidth(pathText) + 2 * padding);
+                }
+
+                const boxHeight = titleHeight + (allPaths.length * lineHeight) + 2 * padding;
+                const boxWidth = maxWidth;
+
+                let boxX = mouseX + 15;
+                let boxY = mouseY + 15;
+                if (boxX + boxWidth > width) boxX = mouseX - boxWidth - 15;
+                if (boxY + boxHeight > height) boxY = mouseY - boxHeight - 15;
+
+                rectMode(CORNER);
+                fill(255, 255, 240, 240);
+                stroke(100);
+                strokeWeight(1);
+                rect(boxX, boxY, boxWidth, boxHeight, 5);
+
+                noStroke();
+                fill(0);
+                textAlign(LEFT, TOP);
+                textStyle(BOLD);
+                textSize(11);
+                text(`All Paths for ${prefix}`, boxX + padding, boxY + padding);
+                
+                textStyle(NORMAL);
+                textSize(10);
+                let yOffset = boxY + padding + titleHeight;
+                for (const p of allPaths) {
+                    const isBest = JSON.stringify(p.path) === JSON.stringify(bestPath);
+                    if (isBest) {
+                        fill(0, 100, 0);
+                        textStyle(BOLD);
+                    } else {
+                        fill(80);
+                        textStyle(NORMAL);
+                    }
+                    text(`${p.path.join(' → ')}`, boxX + padding, yOffset);
+                    yOffset += lineHeight;
+                }
+            } else if (target.type === 'rib') {
+                const allPrefixes = Object.keys(as.rib);
+                const padding = 8;
+                const lineHeight = 12;
+                const titleHeight = 15;
+                let maxWidth = textWidth(`Full RIB for AS ${as.asn}`) + 2 * padding;
+
+                for (const prefix of allPrefixes) {
+                    const bestPath = as.rib[prefix].bestPath;
+                    if (bestPath) {
+                        const pathText = `${prefix}: ${bestPath.join(' → ')}`;
+                        maxWidth = max(maxWidth, textWidth(pathText) + 2 * padding);
+                    }
+                }
+
+                const boxHeight = titleHeight + (allPrefixes.length * lineHeight) + 2 * padding;
+                const boxWidth = maxWidth;
+                
+                let boxX = mouseX + 15;
+                let boxY = mouseY + 15;
+                if (boxX + boxWidth > width) boxX = mouseX - boxWidth - 15;
+                if (boxY + boxHeight > height) boxY = mouseY - boxHeight - 15;
+
+                rectMode(CORNER);
+                fill(255, 255, 240, 240);
+                stroke(100);
+                strokeWeight(1);
+                rect(boxX, boxY, boxWidth, boxHeight, 5);
+
+                noStroke();
+                fill(0);
+                textAlign(LEFT, TOP);
+                textStyle(BOLD);
+                textSize(11);
+                text(`Full RIB for AS ${as.asn}`, boxX + padding, boxY + padding);
+
+                textStyle(NORMAL);
+                textSize(10);
+                let yOffset = boxY + padding + titleHeight;
+                for (const prefix of allPrefixes) {
+                    const bestPath = as.rib[prefix].bestPath;
+                    if (bestPath) {
+                        fill(0,100,0);
+                        text(`${prefix}: `, boxX+padding, yOffset);
+                        const prefixWidth = textWidth(`${prefix}: `);
+                        fill(80);
+                        text(`${bestPath.join(' → ')}`, boxX + padding + prefixWidth, yOffset);
+                        yOffset += lineHeight;
+                    }
+                }
+            }
+            pop(); // Restore original styles
+        }
+        
+        function windowResized() {
+            let container = document.getElementById('canvas-container');
+            // Recalculate canvas size on resize
+            let w = container.offsetWidth;
+            let h = w * 0.6;
+            resizeCanvas(w, h);
+            // Recalculate node positions
+            createTopology();
+        }
+
+        function resetSimulation() {
+             advertisements = [];
+             nextPrefix = 1;
+             createTopology();
         }
 
         // --- Topology Creation ---
@@ -356,109 +563,22 @@
 
             as2.addNeighbor(as3);
             as3.addNeighbor(as2);
-            
-            as2.addNeighbor(as4);
-            as4.addNeighbor(as2);
-            
-            as2.addNeighbor(as5);
-            as5.addNeighbor(as2);
-
-            as3.addNeighbor(as5);
-            as5.addNeighbor(as3);
 
             as1.addNeighbor(as4);
             as4.addNeighbor(as1);
             
+            as3.addNeighbor(as5);
+            as5.addNeighbor(as3);
+
             as4.addNeighbor(as5);
             as5.addNeighbor(as4);
+            
+            as2.addNeighbor(as5);
+            as5.addNeighbor(as2);
 
             systems.push(as1, as2, as3, as4, as5);
         }
-
-        // --- Reset Function ---
-        function resetSimulation() {
-            advertisements = [];
-            nextPrefix = 1;
-            for (const as of systems) {
-                as.rib = {};
-                as.targetColor = color(226, 232, 240);
-                as.color = color(226, 232, 240); // Reset color immediately
-            }
-        }
-
-        // --- P5.js Setup Function ---
-        function setup() {
-            let container = document.getElementById('canvas-container');
-            // Calculate height based on width and CSS aspect ratio (60%)
-            const w = container.offsetWidth;
-            const h = w * 0.6;
-            canvas = createCanvas(w, h);
-            canvas.parent('canvas-container');
-
-            createTopology();
-
-            document.getElementById('reset-button').addEventListener('click', resetSimulation);
-        }
-        
-        // --- P5.js Draw Loop ---
-        function draw() {
-            background(247, 250, 252);
-
-            // Draw connections
-            stroke(150);
-            strokeWeight(3);
-            for (let as of systems) {
-                for (let neighbor of as.neighbors) {
-                    // To avoid drawing lines twice
-                    if (as.asn < neighbor.asn) {
-                        line(as.pos.x, as.pos.y, neighbor.pos.x, neighbor.pos.y);
-                    }
-                }
-            }
-
-            // Update and display advertisements
-            for (let i = advertisements.length - 1; i >= 0; i--) {
-                advertisements[i].display();
-                if (advertisements[i].update()) {
-                    advertisements.splice(i, 1);
-                }
-            }
-
-            // Display systems
-            for (let as of systems) {
-                as.display();
-            }
-        }
-        
-        // --- Interactivity ---
-        function mousePressed() {
-            if (mouseX > 0 && mouseX < width && mouseY > 0 && mouseY < height) {
-                for (let as of systems) {
-                    if (dist(mouseX, mouseY, as.pos.x, as.pos.y) < as.size / 2) {
-                        as.advertisePrefix();
-                        break;
-                    }
-                }
-            }
-        }
-        
-        function windowResized() {
-            let container = document.getElementById('canvas-container');
-            // Recalculate canvas size on resize
-            const w = container.offsetWidth;
-            const h = w * 0.6;
-            resizeCanvas(w, h);
-            
-            // Reset simulation and recreate topology to fit new dimensions
-            advertisements = [];
-            nextPrefix = 1;
-            createTopology();
-        }
-
     </script>
 </body>
 </html>
-
-
-
 
