@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BGP Protocol Animation</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+            background-color: #f0f2f5;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            color: #333;
+        }
+        main {
+            background-color: white;
+            border-radius: 12px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            padding: 2rem;
+            margin: 1rem;
+            max-width: 900px;
+            width: calc(100% - 2rem);
+            text-align: center;
+        }
+        h1 {
+            color: #1a202c;
+            font-size: 2.25rem;
+            margin-bottom: 0.5rem;
+        }
+        p {
+            color: #4a5568;
+            margin-bottom: 1.5rem;
+            max-width: 600px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        #canvas-container {
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+            margin-bottom: 1.5rem;
+            width: 100%;
+            height: 0;
+            padding-bottom: 60%; /* Aspect ratio */
+            position: relative;
+        }
+        #canvas-container canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        #reset-button {
+            background-color: #4299e1;
+            color: white;
+            border: none;
+            padding: 0.75rem 1.5rem;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color 0.2s ease-in-out;
+            margin: 1.5rem 0 0 0;
+        }
+        #reset-button:hover {
+            background-color: #3182ce;
+        }
+        .legend {
+            display: flex;
+            justify-content: center;
+            gap: 1.5rem;
+            margin-top: 1rem;
+            flex-wrap: wrap;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .legend-color {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            border: 1px solid #ddd;
+        }
+    </style>
+</head>
+<body>
+
+    <main>
+        <h1>BGP Protocol Visualization</h1>
+        <p>This animation demonstrates how the Border Gateway Protocol (BGP) shares routing information. Click on any Autonomous System (AS) to have it advertise a new network prefix and watch how other systems learn the best path to reach it.</p>
+        <div id="canvas-container"></div>
+        <button id="reset-button">Reset Simulation</button>
+        <div class="legend">
+            <div class="legend-item">
+                <div class="legend-color" style="background-color: #e2e8f0;"></div>
+                <span>Idle AS</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background-color: #63b3ed;"></div>
+                <span>Advertising AS</span>
+            </div>
+             <div class="legend-item">
+                <div class="legend-color" style="background-color: #c6f6d5;"></div>
+                <span>AS with Path</span>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        // --- P5.js Sketch ---
+
+        let systems = [];
+        let advertisements = [];
+        let nextPrefix = 1;
+        let canvas;
+
+        // --- Autonomous System (AS) Class ---
+        class AutonomousSystem {
+            constructor(asn, x, y) {
+                this.asn = asn;
+                this.pos = createVector(x, y);
+                this.size = 60;
+                this.neighbors = [];
+                // Routing Information Base (RIB)
+                this.rib = {}; // { prefix: { path: [asns], best: true/false } }
+                this.color = color(226, 232, 240); // neutral color
+                this.targetColor = this.color;
+            }
+
+            addNeighbor(neighbor) {
+                this.neighbors.push(neighbor);
+            }
+            
+            // Originate a new route advertisement
+            advertisePrefix() {
+                const prefix = `10.0.${nextPrefix}.0/24`;
+                nextPrefix++;
+                
+                // Add to own RIB
+                this.rib[prefix] = { path: [this.asn], best: true };
+                this.targetColor = color(99, 179, 237); // advertising color
+
+                // Create new advertisements for neighbors
+                for (let neighbor of this.neighbors) {
+                    advertisements.push(new Advertisement(prefix, [this.asn], this, neighbor));
+                }
+            }
+
+            // Receive an advertisement from a neighbor
+            receiveAdvertisement(ad) {
+                // BGP Loop Prevention: if my ASN is already in the path, ignore it.
+                if (ad.path.includes(this.asn)) {
+                    return;
+                }
+
+                // Path Selection Logic: Shortest AS_PATH wins
+                const existingRoute = this.rib[ad.prefix];
+                const newPath = [this.asn, ...ad.path];
+
+                if (!existingRoute || newPath.length < existingRoute.path.length) {
+                    this.rib[ad.prefix] = { path: newPath, best: true };
+                    if(this.targetColor.toString() !== color(99, 179, 237).toString()) {
+                       this.targetColor = color(198, 246, 213); // has path color
+                    }
+
+                    // Propagate the new best path to neighbors
+                    for (let neighbor of this.neighbors) {
+                        // Don't send it back to the AS it came from (Split Horizon)
+                        if (neighbor.asn !== ad.path[0]) {
+                            advertisements.push(new Advertisement(ad.prefix, newPath, this, neighbor));
+                        }
+                    }
+                }
+            }
+
+            display() {
+                // Smooth color transition
+                this.color = lerpColor(this.color, this.targetColor, 0.1);
+
+                stroke(50);
+                strokeWeight(2);
+                fill(this.color);
+                ellipse(this.pos.x, this.pos.y, this.size, this.size);
+
+                noStroke();
+                fill(0);
+                textAlign(CENTER, CENTER);
+                textSize(14);
+                text(`AS ${this.asn}`, this.pos.x, this.pos.y);
+
+                // Display best path from RIB
+                let yOffset = this.pos.y + this.size / 2 + 15;
+                textSize(10);
+                for (const prefix in this.rib) {
+                    const route = this.rib[prefix];
+                    if (route.best) {
+                        fill(0, 100, 0); // Dark green for best path
+                        text(`${prefix}`, this.pos.x, yOffset);
+                        yOffset += 12;
+                        fill(50);
+                        text(`Path: ${route.path.join(' → ')}`, this.pos.x, yOffset);
+                        yOffset += 12;
+                    }
+                }
+            }
+        }
+
+        // --- Advertisement Class ---
+        class Advertisement {
+            constructor(prefix, path, from, to) {
+                this.prefix = prefix;
+                this.path = path;
+                this.from = from;
+                this.to = to;
+                this.pos = from.pos.copy();
+                this.speed = 2;
+                this.progress = 0;
+            }
+
+            update() {
+                let direction = p5.Vector.sub(this.to.pos, this.from.pos);
+                let totalDist = direction.mag();
+                direction.normalize();
+                this.pos.add(direction.mult(this.speed));
+                this.progress = p5.Vector.dist(this.from.pos, this.pos) / totalDist;
+                
+                // Check if arrived
+                if (this.progress >= 1.0) {
+                    this.to.receiveAdvertisement(this);
+                    return true; // Mark for removal
+                }
+                return false;
+            }
+
+            display() {
+                fill(255, 165, 0); // Orange for packet
+                noStroke();
+                rectMode(CENTER);
+                let angle = atan2(this.to.pos.y - this.from.pos.y, this.to.pos.x - this.from.pos.x);
+                push();
+                translate(this.pos.x, this.pos.y);
+                rotate(angle);
+                rect(0, 0, 12, 8);
+                pop();
+                
+                // Display prefix on packet
+                fill(0);
+                textSize(9);
+                textAlign(CENTER, BOTTOM);
+                text(this.prefix, this.pos.x, this.pos.y - 10);
+            }
+        }
+
+        // --- Reset Function ---
+        function resetSimulation() {
+            advertisements = [];
+            nextPrefix = 1;
+            for (const as of systems) {
+                as.rib = {};
+                as.targetColor = color(226, 232, 240);
+                as.color = color(226, 232, 240); // Reset color immediately
+            }
+        }
+
+        // --- P5.js Setup Function ---
+        function setup() {
+            let container = document.getElementById('canvas-container');
+            canvas = createCanvas(container.offsetWidth, container.offsetHeight);
+            canvas.parent('canvas-container');
+
+            // Create Autonomous Systems
+            const as1 = new AutonomousSystem(100, width * 0.2, height * 0.3);
+            const as2 = new AutonomousSystem(200, width * 0.5, height * 0.2);
+            const as3 = new AutonomousSystem(300, width * 0.8, height * 0.3);
+            const as4 = new AutonomousSystem(400, width * 0.35, height * 0.7);
+            const as5 = new AutonomousSystem(500, width * 0.65, height * 0.7);
+
+            // Establish peering (connections)
+            as1.addNeighbor(as2);
+            as2.addNeighbor(as1);
+
+            as2.addNeighbor(as3);
+            as3.addNeighbor(as2);
+            
+            as2.addNeighbor(as4);
+            as4.addNeighbor(as2);
+            
+            as2.addNeighbor(as5);
+            as5.addNeighbor(as2);
+
+            as3.addNeighbor(as5);
+            as5.addNeighbor(as3);
+
+            as1.addNeighbor(as4);
+            as4.addNeighbor(as1);
+            
+            as4.addNeighbor(as5);
+            as5.addNeighbor(as4);
+
+            systems.push(as1, as2, as3, as4, as5);
+
+            document.getElementById('reset-button').addEventListener('click', resetSimulation);
+        }
+        
+        // --- P5.js Draw Loop ---
+        function draw() {
+            background(247, 250, 252);
+
+            // Draw connections
+            stroke(150);
+            strokeWeight(3);
+            for (let as of systems) {
+                for (let neighbor of as.neighbors) {
+                    // To avoid drawing lines twice
+                    if (as.asn < neighbor.asn) {
+                        line(as.pos.x, as.pos.y, neighbor.pos.x, neighbor.pos.y);
+                    }
+                }
+            }
+
+            // Update and display advertisements
+            for (let i = advertisements.length - 1; i >= 0; i--) {
+                advertisements[i].display();
+                if (advertisements[i].update()) {
+                    advertisements.splice(i, 1);
+                }
+            }
+
+            // Display systems
+            for (let as of systems) {
+                as.display();
+            }
+        }
+        
+        // --- Interactivity ---
+        function mousePressed() {
+            if (mouseX > 0 && mouseX < width && mouseY > 0 && mouseY < height) {
+                for (let as of systems) {
+                    if (dist(mouseX, mouseY, as.pos.x, as.pos.y) < as.size / 2) {
+                        as.advertisePrefix();
+                        break;
+                    }
+                }
+            }
+        }
+        
+        function windowResized() {
+            let container = document.getElementById('canvas-container');
+            resizeCanvas(container.offsetWidth, container.offsetHeight);
+        }
+
+    </script>
+</body>
+</html>
+
+
