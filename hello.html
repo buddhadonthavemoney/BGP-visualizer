@@ -96,7 +96,7 @@
 
     <main>
         <h1>BGP Protocol Visualization</h1>
-        <p>This animation demonstrates how the Border Gateway Protocol (BGP) shares routing information. Click on any Autonomous System (AS) to have it advertise a new network prefix and watch how other systems learn the best path to reach it.</p>
+        <p>This animation demonstrates how routing information propagates through a network of Autonomous Systems (AS). When an AS advertises a network prefix, it creates a route and attaches its own number to an attribute called the AS_PATH. As this advertisement is passed to the next AS, that AS prepends its own number to the list. This creates an ordered sequence of AS numbers, the "AS Path," which functions as a distance vector, showing the exact path the advertisement has traveled.<br><br>When an AS receives multiple advertisements for the same prefix, it compares the AS_PATH lists. The path with the fewest AS numbers in its list is considered the shortest and is selected as the best route to the destination.</p>
         <div id="canvas-container"></div>
         <button id="reset-button">Reset Simulation</button>
         <div class="legend">
@@ -131,7 +131,8 @@
                 this.size = 60;
                 this.neighbors = [];
                 // Routing Information Base (RIB)
-                this.rib = {}; // { prefix: { path: [asns], best: true/false } }
+                // { prefix: { allPaths: [{path, fromNeighbor}], bestPath: path } }
+                this.rib = {}; 
                 this.color = color(226, 232, 240); // neutral color
                 this.targetColor = this.color;
             }
@@ -145,13 +146,18 @@
                 const prefix = `10.0.${nextPrefix}.0/24`;
                 nextPrefix++;
                 
+                const initialPath = [this.asn];
+
                 // Add to own RIB
-                this.rib[prefix] = { path: [this.asn], best: true };
+                this.rib[prefix] = {
+                    allPaths: [{ path: initialPath, fromNeighbor: null }], // null indicates self-originated
+                    bestPath: initialPath
+                };
                 this.targetColor = color(99, 179, 237); // advertising color
 
                 // Create new advertisements for neighbors
                 for (let neighbor of this.neighbors) {
-                    advertisements.push(new Advertisement(prefix, [this.asn], this, neighbor));
+                    advertisements.push(new Advertisement(prefix, initialPath, this, neighbor));
                 }
             }
 
@@ -162,21 +168,56 @@
                     return;
                 }
 
-                // Path Selection Logic: Shortest AS_PATH wins
-                const existingRoute = this.rib[ad.prefix];
+                const prefix = ad.prefix;
                 const newPath = [this.asn, ...ad.path];
+                const fromNeighborAsn = ad.from.asn;
 
-                if (!existingRoute || newPath.length < existingRoute.path.length) {
-                    this.rib[ad.prefix] = { path: newPath, best: true };
-                    if(this.targetColor.toString() !== color(99, 179, 237).toString()) {
+                if (!this.rib[prefix]) {
+                    this.rib[prefix] = { allPaths: [], bestPath: null };
+                }
+                const ribEntry = this.rib[prefix];
+                const oldBestPath = ribEntry.bestPath ? [...ribEntry.bestPath] : null;
+
+                // Add or update the path learned from this neighbor
+                let pathFromNeighborFound = false;
+                for (let p of ribEntry.allPaths) {
+                    if (p.fromNeighbor === fromNeighborAsn) {
+                        p.path = newPath;
+                        pathFromNeighborFound = true;
+                        break;
+                    }
+                }
+                if (!pathFromNeighborFound) {
+                    ribEntry.allPaths.push({ path: newPath, fromNeighbor: fromNeighborAsn });
+                }
+
+                // Recalculate best path from all available paths (shortest wins)
+                let bestPathSoFar = null;
+                 // Give preference to locally originated route if it exists
+                const selfOriginated = ribEntry.allPaths.find(p => p.fromNeighbor === null);
+                if (selfOriginated) {
+                    bestPathSoFar = selfOriginated.path;
+                }
+                for (const p of ribEntry.allPaths) {
+                    if (!bestPathSoFar || p.path.length < bestPathSoFar.length) {
+                        bestPathSoFar = p.path;
+                    }
+                }
+                ribEntry.bestPath = bestPathSoFar;
+                
+                const bestPathChanged = JSON.stringify(oldBestPath) !== JSON.stringify(ribEntry.bestPath);
+
+                // If the best path has changed, update color and propagate the new best path
+                if (bestPathChanged) {
+                    if (this.targetColor.toString() !== color(99, 179, 237).toString()) {
                        this.targetColor = color(198, 246, 213); // has path color
                     }
 
                     // Propagate the new best path to neighbors
                     for (let neighbor of this.neighbors) {
-                        // Don't send it back to the AS it came from (Split Horizon)
-                        if (neighbor.asn !== ad.path[0]) {
-                            advertisements.push(new Advertisement(ad.prefix, newPath, this, neighbor));
+                        // Split Horizon: Don't send route back to the AS that gave it to you.
+                        if (neighbor.asn !== ribEntry.bestPath[1]) {
+                            advertisements.push(new Advertisement(prefix, ribEntry.bestPath, this, neighbor));
                         }
                     }
                 }
@@ -197,19 +238,54 @@
                 textSize(14);
                 text(`AS ${this.asn}`, this.pos.x, this.pos.y);
 
-                // Display best path from RIB
+                // Display RIB details
                 let yOffset = this.pos.y + this.size / 2 + 15;
                 textSize(10);
+                textAlign(CENTER, TOP);
+
                 for (const prefix in this.rib) {
-                    const route = this.rib[prefix];
-                    if (route.best) {
-                        fill(0, 100, 0); // Dark green for best path
-                        text(`${prefix}`, this.pos.x, yOffset);
-                        yOffset += 12;
-                        fill(50);
-                        text(`Path: ${route.path.join(' → ')}`, this.pos.x, yOffset);
+                    const ribEntry = this.rib[prefix];
+                    if (!ribEntry.bestPath) continue;
+
+                    // Prefix title
+                    fill(0);
+                    textStyle(BOLD);
+                    text(prefix, this.pos.x, yOffset);
+                    yOffset += 12;
+                    textStyle(NORMAL);
+
+                    // Sort paths to show best one first, then others by length
+                    const sortedPaths = [...ribEntry.allPaths].sort((a, b) => {
+                        const isABest = JSON.stringify(a.path) === JSON.stringify(ribEntry.bestPath);
+                        const isBBest = JSON.stringify(b.path) === JSON.stringify(ribEntry.bestPath);
+                        if (isABest) return -1;
+                        if (isBBest) return 1;
+                        return a.path.length - b.path.length;
+                    });
+
+                    const MAX_PATHS_TO_SHOW = 3;
+                    for (let i = 0; i < Math.min(sortedPaths.length, MAX_PATHS_TO_SHOW); i++) {
+                        const p = sortedPaths[i];
+                        const isBest = JSON.stringify(p.path) === JSON.stringify(ribEntry.bestPath);
+                        if (isBest) {
+                            fill(0, 100, 0); // Dark Green
+                            textStyle(BOLD);
+                            text(`> ${p.path.join(' → ')}`, this.pos.x, yOffset);
+                            textStyle(NORMAL);
+                        } else if (p.fromNeighbor) { // Don't show self-originated if not best
+                            fill(120); // Grey
+                            text(`  ${p.path.join(' → ')}`, this.pos.x, yOffset);
+                        }
                         yOffset += 12;
                     }
+
+                    if (sortedPaths.length > MAX_PATHS_TO_SHOW) {
+                        fill(150);
+                        text(`  (...)`, this.pos.x, yOffset);
+                        yOffset += 12;
+                    }
+
+                    yOffset += 5; // Spacer between prefixes
                 }
             }
         }
@@ -252,37 +328,27 @@
                 rect(0, 0, 12, 8);
                 pop();
                 
-                // Display prefix on packet
+                // Display prefix and path on packet
                 fill(0);
                 textSize(9);
                 textAlign(CENTER, BOTTOM);
-                text(this.prefix, this.pos.x, this.pos.y - 10);
+                text(this.prefix, this.pos.x, this.pos.y - 15);
+                textSize(8);
+                fill(80);
+                text(`[${this.path.join(',')}]`, this.pos.x, this.pos.y - 5);
             }
         }
 
-        // --- Reset Function ---
-        function resetSimulation() {
-            advertisements = [];
-            nextPrefix = 1;
-            for (const as of systems) {
-                as.rib = {};
-                as.targetColor = color(226, 232, 240);
-                as.color = color(226, 232, 240); // Reset color immediately
-            }
-        }
+        // --- Topology Creation ---
+        function createTopology() {
+            systems = []; // Clear any existing systems
 
-        // --- P5.js Setup Function ---
-        function setup() {
-            let container = document.getElementById('canvas-container');
-            canvas = createCanvas(container.offsetWidth, container.offsetHeight);
-            canvas.parent('canvas-container');
-
-            // Create Autonomous Systems
-            const as1 = new AutonomousSystem(100, width * 0.2, height * 0.3);
-            const as2 = new AutonomousSystem(200, width * 0.5, height * 0.2);
-            const as3 = new AutonomousSystem(300, width * 0.8, height * 0.3);
-            const as4 = new AutonomousSystem(400, width * 0.35, height * 0.7);
-            const as5 = new AutonomousSystem(500, width * 0.65, height * 0.7);
+            // Create Autonomous Systems, positions are relative to canvas size
+            const as1 = new AutonomousSystem(100, width * 0.2, height * 0.25);
+            const as2 = new AutonomousSystem(200, width * 0.5, height * 0.15);
+            const as3 = new AutonomousSystem(300, width * 0.8, height * 0.25);
+            const as4 = new AutonomousSystem(400, width * 0.35, height * 0.75);
+            const as5 = new AutonomousSystem(500, width * 0.65, height * 0.75);
 
             // Establish peering (connections)
             as1.addNeighbor(as2);
@@ -307,6 +373,29 @@
             as5.addNeighbor(as4);
 
             systems.push(as1, as2, as3, as4, as5);
+        }
+
+        // --- Reset Function ---
+        function resetSimulation() {
+            advertisements = [];
+            nextPrefix = 1;
+            for (const as of systems) {
+                as.rib = {};
+                as.targetColor = color(226, 232, 240);
+                as.color = color(226, 232, 240); // Reset color immediately
+            }
+        }
+
+        // --- P5.js Setup Function ---
+        function setup() {
+            let container = document.getElementById('canvas-container');
+            // Calculate height based on width and CSS aspect ratio (60%)
+            const w = container.offsetWidth;
+            const h = w * 0.6;
+            canvas = createCanvas(w, h);
+            canvas.parent('canvas-container');
+
+            createTopology();
 
             document.getElementById('reset-button').addEventListener('click', resetSimulation);
         }
@@ -355,11 +444,21 @@
         
         function windowResized() {
             let container = document.getElementById('canvas-container');
-            resizeCanvas(container.offsetWidth, container.offsetHeight);
+            // Recalculate canvas size on resize
+            const w = container.offsetWidth;
+            const h = w * 0.6;
+            resizeCanvas(w, h);
+            
+            // Reset simulation and recreate topology to fit new dimensions
+            advertisements = [];
+            nextPrefix = 1;
+            createTopology();
         }
 
     </script>
 </body>
 </html>
+
+
 
 
